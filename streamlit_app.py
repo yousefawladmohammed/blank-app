@@ -1,11 +1,17 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from datetime import datetime
+import plotly.express as px
+from datetime import datetime, timedelta
 import time
 import os
-import base64
+import yfinance as yf  # For real economic data
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
 
 # إعداد صفحة Streamlit
 st.set_page_config(
@@ -19,8 +25,8 @@ def load_translations():
     return {
         'ar': {
             'title': 'EconoPredict - توقع الناتج المحلي والتضخم في تركيا',
-            'gdp_growth': 'نمو الناتج المحلي الإجمالي',
-            'inflation_rate': 'معدل التضخم',
+            'gdp_growth': 'نمو الناتج المحلي الإجمالي (%)',
+            'inflation_rate': 'معدل التضخم (%)',
             'dashboard': 'لوحة التحكم',
             'historical_data': 'البيانات التاريخية',
             'forecasts': 'التنبؤات',
@@ -34,12 +40,16 @@ def load_translations():
             'run_analysis': 'تشغيل التحليل',
             'analysis_in_progress': 'جاري التحليل...',
             'completed_successfully': 'تم بنجاح',
-            'report_generated': 'تم إنشاء التقرير'
+            'report_generated': 'تم إنشاء التقرير',
+            'model_performance': 'أداء النماذج',
+            'confidence_interval': 'فترة الثقة',
+            'historical_forecast': 'المقارنة التاريخية',
+            'feature_importance': 'أهمية العوامل'
         },
         'en': {
             'title': 'EconoPredict - Turkish Economic Dashboard',
-            'gdp_growth': 'GDP Growth',
-            'inflation_rate': 'Inflation Rate',
+            'gdp_growth': 'GDP Growth (%)',
+            'inflation_rate': 'Inflation Rate (%)',
             'dashboard': 'Dashboard',
             'historical_data': 'Historical Data',
             'forecasts': 'Forecasts',
@@ -53,12 +63,16 @@ def load_translations():
             'run_analysis': 'Run Analysis',
             'analysis_in_progress': 'Analysis in progress...',
             'completed_successfully': 'Completed successfully',
-            'report_generated': 'Report generated'
+            'report_generated': 'Report generated',
+            'model_performance': 'Model Performance',
+            'confidence_interval': 'Confidence Interval',
+            'historical_forecast': 'Historical Forecast',
+            'feature_importance': 'Feature Importance'
         },
         'tr': {
             'title': 'EconoPredict - Türkiye Ekonomi Panosu',
-            'gdp_growth': 'GSYİH Büyümesi',
-            'inflation_rate': 'Enflasyon Oranı',
+            'gdp_growth': 'GSYİH Büyümesi (%)',
+            'inflation_rate': 'Enflasyon Oranı (%)',
             'dashboard': 'Kontrol Paneli',
             'historical_data': 'Tarihsel Veri',
             'forecasts': 'Tahminler',
@@ -72,7 +86,11 @@ def load_translations():
             'run_analysis': 'Analizi Çalıştır',
             'analysis_in_progress': 'Analiz devam ediyor...',
             'completed_successfully': 'Başarıyla tamamlandı',
-            'report_generated': 'Rapor oluşturuldu'
+            'report_generated': 'Rapor oluşturuldu',
+            'model_performance': 'Model Performansı',
+            'confidence_interval': 'Güven Aralığı',
+            'historical_forecast': 'Tarihsel Tahmin',
+            'feature_importance': 'Özellik Önemi'
         }
     }
 
@@ -137,11 +155,33 @@ st.markdown("""
         color: #555;
         font-size: 14px;
     }
+    .stProgress > div > div > div {
+        background-color: #1e3799;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# تحميل البيانات
+# تحميل بيانات حقيقية
 @st.cache_data
+def load_real_data():
+    try:
+        # الحصول على بيانات من ياهو فاينانس
+        gdp = yf.download('TURGDP=ECI', period="20y")['Close'].dropna()
+        inflation = yf.download('TURCPI=ECI', period="20y")['Close'].dropna()
+        
+        # إنشاء إطار بيانات موحد
+        df = pd.DataFrame({
+            'Date': gdp.index,
+            'GDP Growth': gdp.pct_change().fillna(0) * 100,
+            'Inflation': inflation
+        })
+        df['Year'] = df['Date'].dt.year
+        annual_df = df.groupby('Year').mean().reset_index()
+        return annual_df.tail(25)  # آخر 25 سنة
+    except Exception as e:
+        st.error(f"خطأ في تحميل البيانات: {str(e)}")
+        return load_sample_data()
+
 def load_sample_data():
     return pd.DataFrame({
         'Year': list(range(1999, 2024)),
@@ -153,83 +193,203 @@ def load_sample_data():
                       15.2, 11.8, 14.6, 19.6, 15.2, 64.3, 53.9]
     })
 
-data = load_sample_data()
+data = load_real_data()
+
+# نماذج التنبؤ
+@st.cache_resource
+def train_models(data):
+    models = {}
+    
+    # ARIMA لنمو الناتج المحلي
+    gdp_data = data['GDP Growth'].values
+    arima_gdp = ARIMA(gdp_data, order=(2,1,2)).fit()
+    models['ARIMA_GDP'] = arima_gdp
+    
+    # ARIMA للتضخم
+    inflation_data = data['Inflation'].values
+    arima_inflation = ARIMA(inflation_data, order=(1,1,1)).fit()
+    models['ARIMA_INFLATION'] = arima_inflation
+    
+    # راندوم فورست
+    X = data[['Year']]
+    y_gdp = data['GDP Growth']
+    y_inflation = data['Inflation']
+    
+    rf_gdp = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_gdp.fit(X, y_gdp)
+    models['RF_GDP'] = rf_gdp
+    
+    rf_inflation = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_inflation.fit(X, y_inflation)
+    models['RF_INFLATION'] = rf_inflation
+    
+    return models
+
+# تحميل النماذج
+models = train_models(data)
+
+# وظائف التنبؤ
+def forecast_gdp(model_name, years_ahead=2):
+    last_year = data['Year'].max()
+    forecast_years = [last_year + i for i in range(1, years_ahead+1)]
+    
+    if 'ARIMA' in model_name:
+        forecast = models['ARIMA_GDP'].forecast(steps=years_ahead)
+    else:
+        forecast = models['RF_GDP'].predict(np.array(forecast_years).reshape(-1, 1))
+    
+    return forecast_years, forecast
+
+def forecast_inflation(model_name, years_ahead=2):
+    last_year = data['Year'].max()
+    forecast_years = [last_year + i for i in range(1, years_ahead+1)]
+    
+    if 'ARIMA' in model_name:
+        forecast = models['ARIMA_INFLATION'].forecast(steps=years_ahead)
+    else:
+        forecast = models['RF_INFLATION'].predict(np.array(forecast_years).reshape(-1, 1))
+    
+    return forecast_years, forecast
 
 # قسم البيانات التاريخية
 st.subheader(t['historical_data'])
 col1, col2 = st.columns(2)
 
 with col1:
-    fig1, ax1 = plt.subplots(figsize=(10, 4))
-    sns.lineplot(data=data, x='Year', y='GDP Growth', marker='o', color='#1e3799', ax=ax1)
-    ax1.set_title(t['gdp_growth'], fontsize=14)
-    ax1.grid(True, linestyle='--', alpha=0.7)
-    st.pyplot(fig1)
+    fig1 = px.line(data, x='Year', y='GDP Growth', 
+                  title=t['gdp_growth'], markers=True,
+                  labels={'GDP Growth': t['gdp_growth'], 'Year': 'السنة'})
+    fig1.update_layout(template='plotly_white')
+    st.plotly_chart(fig1, use_container_width=True)
 
 with col2:
-    fig2, ax2 = plt.subplots(figsize=(10, 4))
-    sns.lineplot(data=data, x='Year', y='Inflation', marker='o', color='#e55039', ax=ax2)
-    ax2.set_title(t['inflation_rate'], fontsize=14)
-    ax2.grid(True, linestyle='--', alpha=0.7)
-    st.pyplot(fig2)
+    fig2 = px.line(data, x='Year', y='Inflation', 
+                  title=t['inflation_rate'], markers=True,
+                  labels={'Inflation': t['inflation_rate'], 'Year': 'السنة'})
+    fig2.update_layout(template='plotly_white')
+    st.plotly_chart(fig2, use_container_width=True)
 
 # قسم التنبؤات
 st.subheader(t['forecasts'])
 forecast_col1, forecast_col2 = st.columns(2)
 
-# بطاقات المقاييس
+# الحصول على التنبؤات
+gdp_years, gdp_forecast = forecast_gdp('ARIMA')
+inflation_years, inflation_forecast = forecast_inflation('ARIMA')
+
 with forecast_col1:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">{t['gdp_forecast']} (2024)</div>
-        <div class="metric-value">4.8%</div>
-        <div style="font-size:12px;color:#27ae60;">▲ 0.3% عن التوقعات السابقة</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">{t['gdp_forecast']} (2025)</div>
-        <div class="metric-value">4.2%</div>
-        <div style="font-size:12px;color:#27ae60;">▲ 0.1% عن التوقعات السابقة</div>
-    </div>
-    """, unsafe_allow_html=True)
+    for i, year in enumerate(gdp_years):
+        change = gdp_forecast[i] - data[data['Year'] == data['Year'].max()]['GDP Growth'].values[0]
+        arrow = "▲" if change > 0 else "▼"
+        color = "#27ae60" if change > 0 else "#e74c3c"
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">{t['gdp_forecast']} ({year})</div>
+            <div class="metric-value">{gdp_forecast[i]:.1f}%</div>
+            <div style="font-size:12px;color:{color};">
+                {arrow} {abs(change):.1f}% عن آخر قياس
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 with forecast_col2:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">{t['inflation_forecast']} (2024)</div>
-        <div class="metric-value">48.5%</div>
-        <div style="font-size:12px;color:#e74c3c;">▼ 1.2% عن التوقعات السابقة</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">{t['inflation_forecast']} (2025)</div>
-        <div class="metric-value">36.2%</div>
-        <div style="font-size:12px;color:#e74c3c;">▼ 2.1% عن التوقعات السابقة</div>
-    </div>
-    """, unsafe_allow_html=True)
+    for i, year in enumerate(inflation_years):
+        change = inflation_forecast[i] - data[data['Year'] == data['Year'].max()]['Inflation'].values[0]
+        arrow = "▲" if change > 0 else "▼"
+        color = "#e74c3c" if change > 0 else "#27ae60"
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">{t['inflation_forecast']} ({year})</div>
+            <div class="metric-value">{inflation_forecast[i]:.1f}%</div>
+            <div style="font-size:12px;color:{color};">
+                {arrow} {abs(change):.1f}% عن آخر قياس
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 # مقارنة النماذج
 st.subheader(t['model_comparison'])
-model_data = pd.DataFrame({
-    'Model': ['ARIMA', 'Random Forest', 'XGBoost', 'LSTM'],
-    'GDP Forecast': [4.7, 4.9, 4.8, 4.6],
-    'Inflation Forecast': [49.2, 47.8, 48.5, 49.1]
-})
+model_options = ['ARIMA', 'Random Forest']
+
+# إنشاء بيانات المقارنة
+comparison_data = []
+for model in model_options:
+    _, gdp_fc = forecast_gdp(model)
+    _, inf_fc = forecast_inflation(model)
+    comparison_data.append({
+        'Model': model,
+        'GDP Forecast': gdp_fc[0],
+        'Inflation Forecast': inf_fc[0]
+    })
+
+model_data = pd.DataFrame(comparison_data)
 
 # رسم بياني مقارنة
-fig, ax = plt.subplots(1, 2, figsize=(14, 6))
-sns.barplot(x='Model', y='GDP Forecast', data=model_data, ax=ax[0], palette='Blues_d')
-ax[0].set_title(t['gdp_forecast'], fontsize=14)
-ax[0].set_ylim(4.0, 5.5)
-sns.barplot(x='Model', y='Inflation Forecast', data=model_data, ax=ax[1], palette='Reds_d')
-ax[1].set_title(t['inflation_forecast'], fontsize=14)
-ax[1].set_ylim(45, 52)
+fig = plt.figure(figsize=(14, 6))
+ax1 = fig.add_subplot(121)
+ax2 = fig.add_subplot(122)
+
+sns.barplot(x='Model', y='GDP Forecast', data=model_data, ax=ax1, palette='Blues_d')
+ax1.set_title(t['gdp_forecast'], fontsize=14)
+ax1.set_ylabel('%')
+
+sns.barplot(x='Model', y='Inflation Forecast', data=model_data, ax=ax2, palette='Reds_d')
+ax2.set_title(t['inflation_forecast'], fontsize=14)
+ax2.set_ylabel('%')
+
 plt.tight_layout()
 st.pyplot(fig)
+
+# تقييم أداء النماذج
+st.subheader(t['model_performance'])
+
+# حساب أداء النماذج
+def calculate_performance(data, target):
+    train_data = data.iloc[:-5]  # تدريب على جميع البيانات ما عدا آخر 5 سنوات
+    test_data = data.iloc[-5:]   # اختبار على آخر 5 سنوات
+    
+    # ARIMA
+    arima_model = ARIMA(train_data[target], order=(2,1,2)).fit()
+    arima_pred = arima_model.forecast(steps=len(test_data))
+    arima_rmse = np.sqrt(mean_squared_error(test_data[target], arima_pred))
+    
+    # Random Forest
+    X_train = train_data[['Year']]
+    y_train = train_data[target]
+    X_test = test_data[['Year']]
+    y_test = test_data[target]
+    
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_model.fit(X_train, y_train)
+    rf_pred = rf_model.predict(X_test)
+    rf_rmse = np.sqrt(mean_squared_error(y_test, rf_pred))
+    
+    return {
+        'ARIMA': arima_rmse,
+        'Random Forest': rf_rmse
+    }
+
+gdp_performance = calculate_performance(data, 'GDP Growth')
+inflation_performance = calculate_performance(data, 'Inflation')
+
+# عرض أداء النماذج
+perf_col1, perf_col2 = st.columns(2)
+
+with perf_col1:
+    st.markdown("**أداء نماذج الناتج المحلي (RMSE)**")
+    st.dataframe(pd.DataFrame.from_dict(gdp_performance, 
+                                       orient='index',
+                                       columns=['القيمة']).rename_axis('النموذج').reset_index(),
+                hide_index=True)
+
+with perf_col2:
+    st.markdown("**أداء نماذج التضخم (RMSE)**")
+    st.dataframe(pd.DataFrame.from_dict(inflation_performance, 
+                                       orient='index',
+                                       columns=['القيمة']).rename_axis('النموذج').reset_index(),
+                hide_index=True)
 
 # أحدث البيانات
 st.subheader(t['latest_data'])
@@ -239,32 +399,88 @@ st.dataframe(latest_data.style.format("{:.1f}"), use_container_width=True)
 
 # تحليل متقدم
 st.sidebar.header("⚙️ " + t['select_model'])
-model_options = ['ARIMA', 'XGBoost', 'LSTM', 'Ensemble']
+model_options = ['ARIMA', 'Random Forest']
 selected_model = st.sidebar.selectbox(t['select_model'], model_options)
 
 indicator_options = [t['gdp_growth'], t['inflation_rate']]
 selected_indicator = st.sidebar.selectbox(t['select_indicator'], indicator_options)
 
-# نتائج افتراضية
-gdp_result = 4.8
-inflation_result = 48.5
+# خيارات متقدمة
+st.sidebar.header("⚡ خيارات متقدمة")
+forecast_years = st.sidebar.slider("سنوات التنبؤ", 1, 5, 2)
+confidence_level = st.sidebar.slider("مستوى الثقة (%)", 80, 99, 95)
 
 if st.sidebar.button("🚀 " + t['run_analysis']):
-    with st.spinner(t['analysis_in_progress']):
-        time.sleep(2)
-        st.success(f"✅ {t['forecasts']} {t['completed_successfully']}")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i in range(100):
+        progress_bar.progress(i + 1)
+        status_text.text(f"{t['analysis_in_progress']} {i+1}%")
+        time.sleep(0.02)
+    
+    status_text.success(f"✅ {t['forecasts']} {t['completed_successfully']}")
+    
+    # عرض النتائج
+    if selected_indicator == t['gdp_growth']:
+        years, forecast = forecast_gdp(selected_model, forecast_years)
+        current_value = data[data['Year'] == data['Year'].max()]['GDP Growth'].values[0]
         
-        # نتائج محاكاة بناء على الاختيارات
-        gdp_result = 4.8 + (0.1 if selected_model == "Random Forest" else -0.1 if selected_model == "LSTM" else 0)
-        inflation_result = 48.5 + (-0.5 if selected_model == "Random Forest" else 0.3 if selected_model == "LSTM" else 0)
+        st.subheader(f"{t['gdp_forecast']} - {selected_model}")
         
-        st.subheader(f"{t['forecasts']} - {selected_model} ({selected_indicator})")
-        if selected_indicator == t['gdp_growth']:
-            st.metric(t['gdp_forecast'], f"{gdp_result}%", f"{gdp_result - 4.7:.1f}%")
-            st.info(f"النموذج {selected_model} يتوقع نمواً اقتصادياً بنسبة {gdp_result}% في 2024")
-        else:
-            st.metric(t['inflation_forecast'], f"{inflation_result}%", f"{inflation_result - 49.0:.1f}%")
-            st.info(f"النموذج {selected_model} يتوقع معدل تضخم {inflation_result}% في 2024")
+        # رسم التنبؤ
+        forecast_df = pd.DataFrame({
+            'Year': years,
+            'Forecast': forecast,
+            'Actual': [None] * len(years)
+        })
+        
+        # إنشاء مخطط شامل
+        full_data = data[['Year', 'GDP Growth']].rename(columns={'GDP Growth': 'Actual'})
+        full_data['Type'] = 'تاريخي'
+        forecast_df['Type'] = 'تنبؤ'
+        combined = pd.concat([full_data, forecast_df[['Year', 'Forecast', 'Type']].rename(columns={'Forecast': 'Actual'})])
+        
+        fig = px.line(combined, x='Year', y='Actual', color='Type', 
+                     markers=True, title=t['gdp_forecast'],
+                     labels={'Actual': t['gdp_growth'], 'Year': 'السنة'})
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # عرض القيم
+        for i, year in enumerate(years):
+            st.metric(f"{t['gdp_forecast']} {year}", 
+                     f"{forecast[i]:.1f}%",
+                     delta=f"{forecast[i] - current_value:.1f}%")
+            
+    else:
+        years, forecast = forecast_inflation(selected_model, forecast_years)
+        current_value = data[data['Year'] == data['Year'].max()]['Inflation'].values[0]
+        
+        st.subheader(f"{t['inflation_forecast']} - {selected_model}")
+        
+        # رسم التنبؤ
+        forecast_df = pd.DataFrame({
+            'Year': years,
+            'Forecast': forecast,
+            'Actual': [None] * len(years)
+        })
+        
+        # إنشاء مخطط شامل
+        full_data = data[['Year', 'Inflation']].rename(columns={'Inflation': 'Actual'})
+        full_data['Type'] = 'تاريخي'
+        forecast_df['Type'] = 'تنبؤ'
+        combined = pd.concat([full_data, forecast_df[['Year', 'Forecast', 'Type']].rename(columns={'Forecast': 'Actual'})])
+        
+        fig = px.line(combined, x='Year', y='Actual', color='Type', 
+                     markers=True, title=t['inflation_forecast'],
+                     labels={'Actual': t['inflation_rate'], 'Year': 'السنة'})
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # عرض القيم
+        for i, year in enumerate(years):
+            st.metric(f"{t['inflation_forecast']} {year}", 
+                     f"{forecast[i]:.1f}%",
+                     delta=f"{forecast[i] - current_value:.1f}%")
 
 # قسم التقارير
 st.sidebar.header("📊 " + t['download_report'])
@@ -272,39 +488,56 @@ report_type = st.sidebar.radio("نوع التقرير", ["تقرير مختصر"
 
 if st.sidebar.button("📥 " + t['download_report']):
     with st.spinner("جاري إنشاء التقرير..."):
-        time.sleep(1.5)
+        progress_bar = st.sidebar.progress(0)
+        for i in range(100):
+            progress_bar.progress(i + 1)
+            time.sleep(0.01)
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"EconoPredict_Report_{timestamp}.pdf"
         
-        # إنشاء تقرير PDF افتراضي
+        # محاكاة إنشاء ملف PDF
         from fpdf import FPDF
         pdf = FPDF()
         pdf.add_page()
-        pdf.add_font('DejaVu', '', 'DejaVuSansCondensed.ttf', uni=True)
-        pdf.set_font('DejaVu', size=14)
+        pdf.add_font('Noto', '', 'NotoNaskhArabic-Regular.ttf', uni=True)
+        pdf.set_font('Noto', size=14)
+        
         pdf.cell(200, 10, txt=f"تقرير EconoPredict - {datetime.now().strftime('%Y-%m-%d')}", ln=True, align='C')
-        pdf.set_font('DejaVu', size=12)
         pdf.cell(200, 10, txt=f"نموذج: {selected_model}", ln=True)
         pdf.cell(200, 10, txt=f"المؤشر: {selected_indicator}", ln=True)
         pdf.cell(200, 10, txt="", ln=True)
-        pdf.cell(200, 10, txt=f"تنبؤ الناتج المحلي: {gdp_result}%", ln=True)
-        pdf.cell(200, 10, txt=f"تنبؤ التضخم: {inflation_result}%", ln=True)
+        
+        if selected_indicator == t['gdp_growth']:
+            years, forecast = forecast_gdp(selected_model, forecast_years)
+            for i, year in enumerate(years):
+                pdf.cell(200, 10, txt=f"تنبؤ الناتج المحلي لسنة {year}: {forecast[i]:.1f}%", ln=True)
+        else:
+            years, forecast = forecast_inflation(selected_model, forecast_years)
+            for i, year in enumerate(years):
+                pdf.cell(200, 10, txt=f"تنبؤ التضخم لسنة {year}: {forecast[i]:.1f}%", ln=True)
+                
         pdf.output(filename)
         
     st.sidebar.success(f"✅ {t['report_generated']}")
-    
-    # تحويل الملف إلى base64 للتحميل
-    with open(filename, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    
-    st.sidebar.markdown(
-        f'<a href="data:application/pdf;base64,{base64_pdf}" download="{filename}">⬇️ {t["download_report"]}</a>',
-        unsafe_allow_html=True
-    )
-    
-    # حذف الملف المؤقت
+    with open(filename, "rb") as file:
+        st.sidebar.download_button(
+            label="⬇️ " + t['download_report'],
+            data=file,
+            file_name=filename,
+            mime="application/pdf"
+        )
     os.remove(filename)
 
+# تذييل الصفحة
+st.markdown("---")
+st.markdown("""
+<div class="footer">
+    <strong>EconoPredict</strong> - نظام متقدم للتنبؤ الاقتصادي<br>
+    تم تطويره بواسطة: يوسف اولاد محمد<br>
+    © 2023 جميع الحقوق محفوظة | الإصدار 2.1
+</div>
+""", unsafe_allow_html=True)
 # Footer
 st.markdown("---")
 st.markdown("""
