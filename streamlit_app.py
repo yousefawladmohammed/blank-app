@@ -538,12 +538,3 @@ st.markdown("""
     © 2023 جميع الحقوق محفوظة | الإصدار 2.1
 </div>
 """, unsafe_allow_html=True)
-# Footer
-st.markdown("---")
-st.markdown("""
-<div class="footer">
-    <strong>EconoPredict</strong> - Advanced economic forecasting system<br>
-    Developed by: yousef awladmohammed<br>
-    © 2023 All rights reserved | Version 2.1
-</div>
-""", unsafe_allow_html=True)
