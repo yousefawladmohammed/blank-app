@@ -519,7 +519,7 @@ if st.sidebar.button("📥 " + t['download_report']):
                 
         pdf.output(filename)
         
-    st.sidebar.success(f"✅ {t['report_generated']}")
+st.sidebar.success(f"✅ {t['report_generated']}")
     with open(filename, "rb") as file:
         st.sidebar.download_button(
             label="⬇️ " + t['download_report'],
